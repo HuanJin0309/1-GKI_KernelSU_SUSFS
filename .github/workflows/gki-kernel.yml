@@ -41,16 +41,16 @@ on:
         required: true
         type: boolean
         default: true
+      use_bbg:
+        required: true
+        type: boolean
+        default: true
       use_kpm:
         required: true
         type: boolean
         default: true
       supp_op:
         required: true
-        type: boolean
-        default: false
-      fast:
-        required: false
         type: boolean
         default: false
       onlyAk3:
@@ -257,7 +257,7 @@ jobs:
               case "$variant_input" in
                 "Official" | "MKSU") echo "BRANCH=-s main" >> $GITHUB_ENV ;;
                 "Next")              echo "BRANCH=-s next" >> $GITHUB_ENV ;;
-                "SukiSU")           echo "BRANCH=-s susfs-main" >> $GITHUB_ENV ;;
+                "SukiSU")           echo "BRANCH=-s susfs-test" >> $GITHUB_ENV ;;
                 *) 
                   echo "错误：未定义开发分支的变体 '$variant_input'" >&2
                   exit 1
@@ -288,6 +288,16 @@ jobs:
             echo "Adding KernelSU SukiSU..."
             curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash $BRANCH
           fi
+      
+      - name: SUKISU管理器信息
+        if: ${{ inputs.kernelsu_variant == 'SukiSU' }}
+        run: |
+          if [ ! -z "${{ vars.MANAGER_STR }}" ]; then
+            cd "$CONFIG"
+            cd ./KernelSU
+            sed -i 's|\$(shell cd \$(srctree)/\$(src); \$(GIT_BIN) rev-parse --short=8 HEAD)|${{ vars.MANAGER_STR }}|g' ./kernel/Makefile 
+            sed -n '50,60p' ./kernel/Makefile
+          fi
 
       - name: 为 KernelSU 变体安装 SUSFS 补丁
         run: |
@@ -305,14 +315,11 @@ jobs:
             echo "Applying SUSFS patches for Official KernelSU..."
             cd ./KernelSU
             cp ../../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch ./ 
-            patch -p1 --forward --fuzz=3 < 10_enable_susfs_for_ksu.patch || true
-            # 当KSU为标准版,无须额外补丁
-            if [ "$BRANCH" != "-" ]; then
-              cp ../../zzh_patch/core_hook.c.patch ./
-              cp ../../zzh_patch/rules.c.patch ./
-              patch -p1 --fuzz=3 < core_hook.c.patch
-              patch -p1 --fuzz=3 < rules.c.patch
-            fi
+            patch -p1 --forward < 10_enable_susfs_for_ksu.patch || true
+
+            # echo "Applying Official specific patches..."
+            # cp ../../zzh_patch/mksu_core_hook.c.patch ./
+            # patch -p1 --fuzz=3 < mksu_core_hook.c.patch
 
           elif [ "${{ inputs.kernelsu_variant }}" == "Next" ]; then
             # 临时恢复KSU-NEXT的dev编译
@@ -321,31 +328,25 @@ jobs:
             if [ "$BRANCH" == "-s next" ]; then
               echo "当前为Dev分支的KernelSU-Next"
               cp ../../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch ./
-              patch -p1 --forward --fuzz=3 < 10_enable_susfs_for_ksu.patch || true
+              patch -p1 < 10_enable_susfs_for_ksu.patch || true
               echo "应用临时修复补丁"
               cp ../../zzh_patch/next-patch/* ./
-              patch -p1 --fuzz=3 --forward < apk_sign.patch
-              patch -p1 --fuzz=3 --forward < core_hook.patch
-              patch -p1 --fuzz=3 --forward < ksud.patch
-              patch -p1 --fuzz=3 --forward < selinux.patch
-              patch -p1 --fuzz=3 --forward < rules.c.patch
-              patch -p1 --fuzz=3 --forward < sucompat.c.patch
-              patch -p1 --fuzz=3 --forward < kernel_compat.c.patch
+              patch -p1 < fix_apk_sign.c.patch
+              patch -p1 < fix_core_hook.c.patch
+              patch -p1 < fix_sucompat.c.patch
+              patch -p1 < fix_kernel_compat.c.patch
             fi
             
           elif [ "${{ inputs.kernelsu_variant }}" == "MKSU" ]; then
             echo "Applying SUSFS patches for MKSU..."
             cd ./KernelSU
-            # 回退 devpts hooks 提交
-            git revert --no-edit 99b82405e8473b715e8edb92e2226dc3c376bde4
 
             cp ../../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch ./
-            patch -p1 --forward --fuzz=3 < 10_enable_susfs_for_ksu.patch || true
+            patch -p1 --forward < 10_enable_susfs_for_ksu.patch || true
 
-            cp ../../zzh_patch/core_hook.c.patch ./
-            cp ../../zzh_patch/rules.c.patch ./
-            patch -p1 --fuzz=3 < core_hook.c.patch
-            patch -p1 --fuzz=3 < rules.c.patch
+            # echo "Applying MKSU specific patches..."
+            # cp ../../zzh_patch/mksu_core_hook.c.patch ./
+            # patch -p1 --fuzz=3 < mksu_core_hook.c.patch
 
           elif [ "${{ inputs.kernelsu_variant }}" == "SukiSU" ]; then
             echo "Applying SUSFS patches for SukiSU..."
@@ -357,7 +358,14 @@ jobs:
           fi
 
           cd ../common
+
+
           patch -p1 --fuzz=3 < 50_add_susfs_in_gki-${{ inputs.android_version }}-${{ inputs.kernel_version }}.patch || true
+
+          if [ "${{ inputs.kernelsu_variant }}" == "MKSU" ]; then
+            cp ../../zzh_patch/rm_devpt.patch ./
+            patch -p1 < rm_devpt.patch
+          fi
 
           FORMATTED_BRANCH="${{ inputs.android_version }}-${{ inputs.kernel_version }}"
           if grep -q deprecated <<< "$REMOTE_BRANCH" && \
@@ -365,6 +373,41 @@ jobs:
                [ ${{ inputs.sub_level }} -lt 136 ]; }; then
             cp ../../zzh_patch/5.10-patch/fdinfo.c.patch ./
             patch -p1 < fdinfo.c.patch
+          fi
+  
+      - name: 一些修复补丁
+        run: |
+          cd "$CONFIG/common"
+          FORMATTED_BRANCH="${{ inputs.android_version }}-${{ inputs.kernel_version }}"
+          # Fake Patch to fix failures
+          fake_patched=0
+          if [ "$FORMATTED_BRANCH" = "android15-6.6" ]; then
+            if ! grep -qxF $'\tunsigned int nr_subpages = __PAGE_SIZE / PAGE_SIZE;' ./fs/proc/task_mmu.c; then
+              echo "未找到 nr_subpages,正在进行补丁修复"
+              sed -i -e '/int ret = 0, copied = 0;/a \\tunsigned int nr_subpages \= __PAGE_SIZE \/ PAGE_SIZE;' -e '/int ret = 0, copied = 0;/a \\tpagemap_entry_t \*res = NULL;' ./fs/proc/task_mmu.c
+              fake_patched=1
+            fi
+          fi
+          
+          if [ "$FORMATTED_BRANCH" = "android12-5.10" ] || [ "$FORMATTED_BRANCH" = "android13-5.10" ] || [ "$FORMATTED_BRANCH" = "android13-5.15" ]; then
+            if ! grep -qxF $'\tif (!vma_pages(vma))' ./fs/proc/task_mmu.c; then
+              echo "未找到 vma_pages,正在进行补丁修复"
+              fake_patched=1
+            fi
+          fi
+
+          if [ "$fake_patched" = 1 ]; then
+            if [ "$FORMATTED_BRANCH" = "android15-6.6" ]; then
+              if grep -qxF $'\tunsigned int nr_subpages = __PAGE_SIZE / PAGE_SIZE;' ./fs/proc/task_mmu.c; then
+                sed -i -e '/unsigned int nr_subpages \= __PAGE_SIZE \/ PAGE_SIZE;/d' -e '/pagemap_entry_t \*res = NULL;/d' ./fs/proc/task_mmu.c
+              fi
+            fi
+            
+            if [ "$FORMATTED_BRANCH" = "android12-5.10" ] || [ "$FORMATTED_BRANCH" = "android13-5.10" ] || [ "$FORMATTED_BRANCH" = "android13-5.15" ]; then
+              if grep -qxF $'\t\tgoto show_pad;' ./fs/proc/task_mmu.c; then
+                sed -i -e 's/goto show_pad;/return 0;/' ./fs/proc/task_mmu.c
+              fi
+            fi
           fi
   
       - name: 应用新的HOOKS补丁
@@ -378,11 +421,12 @@ jobs:
             patch -p1 -F 3 < scope_min_manual_hooks_v1.4.patch
           elif [ "${{ inputs.kernelsu_variant }}" == "SukiSU" ]; then
             echo "Applying hooks for SukiSU..."
-            cp ../../kernel_patches/next/scope_min_manual_hooks_v1.4.patch ./
-            patch -p1 -F 3 < scope_min_manual_hooks_v1.4.patch
+            cp ../../SukiSU_patch/hooks/syscall_hooks.patch ./
+            patch -p1 -F 3 < syscall_hooks.patch
           fi
       
       - name: 升级LZ4至1.10.0
+        if: ${{ inputs.use_zram }}
         run: |
 
           echo "更改为配置目录: $CONFIG..."
@@ -444,18 +488,6 @@ jobs:
           patch -p1 -F 3 < lz4k_oplus.patch || true
           echo '完成lz4k_oplus补丁'
 
-      - name: 应用隐藏某特征的补丁
-        run: |
-          echo "更改为配置目录: $CONFIG..."
-          cd "$CONFIG/common"
-          # Apply additional patch
-          if [ "${{ inputs.kernelsu_variant }}" == "SukiSU" ]; then
-          cp ../../SukiSU_patch/69_hide_stuff.patch ./
-          patch -p1 -F 3 < 69_hide_stuff.patch
-          else
-            cp ../../kernel_patches/69_hide_stuff.patch ./
-            patch -p1 -F 3 < 69_hide_stuff.patch
-          fi
       
       - name: 修复三星 6.6 GKI设备上的Wi-Fi和蓝牙功能
         if: ${{ ( inputs.kernel_version == '6.6' ) }}
@@ -524,7 +556,36 @@ jobs:
             echo "CONFIG_CRYPTO_842=y" >> "$CONFIG_FILE"
             echo "CONFIG_CRYPTO_LZ4K_OPLUS=y" >> "$CONFIG_FILE"
           fi
+      
+      - name: BBG patch
+        if: ${{ inputs.use_bbg }}
+        run: |
+          cd "$CONFIG"
+          echo "Adding BBG..."
+          wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
+          echo "CONFIG_BBG=y" >> common/arch/arm64/configs/gki_defconfig
           
+          # Before sed: Show the original LSM default line for comparison
+          echo "=== Before sed ==="
+          sed -n '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ p }' common/security/Kconfig
+          
+          # Apply the sed command to add baseband_guard to default security configurations
+          sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/lockdown/lockdown,baseband_guard/ } }' common/security/Kconfig
+          
+          # After sed: Show the updated LSM default line
+          echo "=== After sed ==="
+          sed -n '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ p }' common/security/Kconfig
+          
+          # Confirm baseband_guard is now present (should output the line if successful)
+          echo "=== Confirmation: grep for baseband_guard ==="
+          if ! grep -q "baseband_guard" common/security/Kconfig; then
+            echo "ERROR: baseband_guard not found after sed - stopping workflow"
+            exit 1
+          else
+            echo "SUCCESS: baseband_guard found in security configuration"
+            grep "baseband_guard" common/security/Kconfig
+          fi
+
       - name: 添加SUSFS配置设置
         run: |
           echo "更改为配置目录: $CONFIG..."
@@ -545,7 +606,6 @@ jobs:
           
           # Add SUSFS configuration settings
           echo "CONFIG_KSU_SUSFS=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
@@ -559,6 +619,7 @@ jobs:
           echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_KSU_SUSFS_SUS_MAP=y" >> ./common/arch/arm64/configs/gki_defconfig
           
           # Remove check_defconfig
           sed -i 's/check_defconfig//' ./common/build.config.gki
@@ -598,10 +659,10 @@ jobs:
             rm -rf ./common/android/abi_gki_protected_exports_*
           # 去除dirty块
             sed -i "/stable_scmversion_cmd/s/-maybe-dirty//g" ./build/kernel/kleaf/impl/stamp.bzl
+
           fi
 
       - name: 配置内核名称(常规构建)
-        if: ${{ !inputs.fast }}
         run: |
           echo "更改为配置目录: $CONFIG..."
           cd "$CONFIG"
@@ -664,69 +725,18 @@ jobs:
             sed -i '/MODULES_ORDER=android\/gki_aarch64_modules/d' ./common/build.config.gki.aarch64
             sed -i '/KMI_SYMBOL_LIST_STRICT_MODE/d' ./common/build.config.gki.aarch64
 
+            
+            
             echo "Building the kernel..."
             if [ -f "build/build.sh" ]; then
               LTO=thin BUILD_CONFIG=common/build.config.gki.aarch64 build/build.sh CC="/usr/bin/ccache clang" || exit 1
-            elif [ "${{ inputs.fast }}" != "true" ]; then
+            else
               tools/bazel build --disk_cache=/home/runner/.cache/bazel --config=fast --lto=thin //common:kernel_aarch64_dist || exit 1
               echo "debug:输出内核版本号"
               strings ./bazel-bin/common/kernel_aarch64/Image | grep 'Linux version'
-            else
-              # sed -i 's/-dirty//' ./common/scripts/setlocalversion
-              case "${{ inputs.kernel_version }}" in
-                  "6.1")
-                      CLANG_VERSION="clang-r487747c"
-                      ;;
-                  "6.6")
-                      CLANG_VERSION="clang-r510928"
-                      ;;
-                  *)
-                      echo "Error: Unsupported kernel_version: '${{ inputs.kernel_version }}'"
-                      exit 1
-                      ;;
-              esac
-
-                echo "Using Clang version: $CLANG_VERSION for Kernel version: ${{ inputs.kernel_version }}"
-
-                cd common
-
-                export PATH="$GITHUB_WORKSPACE/$CONFIG/prebuilts/clang/host/linux-x86/$CLANG_VERSION/bin:$PATH"
-                export PATH="$GITHUB_WORKSPACE/$CONFIG/gcc/bin:$PATH"
-                export PATH="$GITHUB_WORKSPACE/$CONFIG/prebuilts/kernel-build-tools/linux-x86/bin:$PATH"
-                export PATH="/usr/lib/ccache:$PATH"
-
-                echo "--- Clang Version ---"
-                clang --version
-                echo "--- GCC Version ---"
-                aarch64-linux-gnu-gcc -v
-
-                COMMON_MAKE_PARAMS=(
-                  -j$(nproc --all)
-                  O=out
-                  ARCH=arm64
-                  LLVM=1
-                  CC="ccache clang"
-                  CROSS_COMPILE=aarch64-linux-gnu-
-              )
-
-              BUILD_TARGETS=(
-                  Image
-                  Image.lz4
-                  Image.gz
-                  modules
-              )
-              
-              echo "--- Running make gki_defconfig ---"
-              make "${COMMON_MAKE_PARAMS[@]}" gki_defconfig || { echo "make defconfig failed"; exit 1; }
-              make "${COMMON_MAKE_PARAMS[@]}" "${BUILD_TARGETS[@]}" || { echo "make failed"; exit 1; }
-  
-              mkdir -p ../bazel-bin/common/kernel_aarch64/
-              echo "debug:输出内核版本号"
-              strings out/arch/arm64/boot/Image | grep 'Linux version'
-              cp ./out/arch/arm64/boot/Image* ../bazel-bin/common/kernel_aarch64/
             fi
-            
-      - name: 修补 Image 文件 安卓12和安卓13(仅限sukisu)
+
+      - name: 修补 Image 文件(仅限sukisu)
         if: ${{ inputs.use_kpm && inputs.kernelsu_variant == 'SukiSU' && (inputs.android_version == 'android12' || inputs.android_version == 'android13') }}
         run: |
           if [ "${{ inputs.kernel_version }}" != "6.6" ]; then
@@ -743,7 +753,7 @@ jobs:
       - name: 修补 Image 文件 安卓14和安卓15(仅限sukisu)
         if: ${{ inputs.use_kpm && inputs.kernelsu_variant == 'SukiSU' && (inputs.android_version == 'android14' || inputs.android_version == 'android15') }}
         run: |
-          if [ "${{ inputs.kernel_version }}" != "6.6" ]; then
+
             echo "Patching Image file..."
             cd "$CONFIG/bazel-bin/common/kernel_aarch64/"
             curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU_patch/refs/heads/main/kpm/patch_linux" -o patch
@@ -752,7 +762,6 @@ jobs:
             rm -rf Image
             mv oImage Image
             cd ../../..
-          fi
 
       - name: 创建Bootimgs文件夹并复制镜像
         if: ${{ inputs.android_version == 'android12' || inputs.android_version == 'android13' }}
